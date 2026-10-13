@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ASEAN Population — Immersive Data Visualization</title>
+  <script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; font-family: Arial, Helvetica, sans-serif; }
+    #hud { position: fixed; left: 12px; bottom: 12px; z-index: 10; max-width: 340px;
+           background: rgba(15,23,32,.85); color: #fff; padding: 10px 12px; border-radius: 8px;
+           font-size: 13px; line-height: 1.6; }
+    #hud button { background: #1f77b4; color: #fff; border: 0; border-radius: 5px;
+                  padding: 4px 8px; margin: 3px 3px 0 0; cursor: pointer; font-size: 12px; }
+    #hud button:hover { background: #2b8fd6; }
+    #hud.hidden { display: none; }
+  </style>
+
+  <script>
+    /* =====================================================================
+       1. KONSTANTA & DATA  (angka disalin dari dashboard 2D, satuan: juta jiwa)
+       ===================================================================== */
+    const EYE = 1.6;          // tinggi mata pengunjung (m)
+    const PX_PER_CM = 15;     // resolusi tekstur: 1 m = 1500 px
+    const CAP = 0.716;        // tinggi huruf kapital Arial = 0.716 x ukuran font
+    const MINUS = '\u2212';
+    const COL = { ink: '#1f2933', mute: '#5f6b76', grid: '#dfe4ea', bar: '#bdbdbd',
+                  hi: '#0f4c81', bg: '#ffffff', edge: '#c9d1d9' };
+
+    const DATA = {
+      rank2005: [["Indonesia",230.872],["Philippines",88.016],["Vietnam",81.088],["Thailand",66.017],
+                 ["Myanmar",47.438],["Malaysia",25.836],["Cambodia",13.439],["Laos",5.870],
+                 ["Singapore",4.268],["Timor-Leste",0.948],["Brunei",0.359]],
+      rank2021: [["Indonesia",276.758],["Philippines",113.101],["Vietnam",98.935],["Thailand",71.727],
+                 ["Myanmar",53.387],["Malaysia",34.282],["Cambodia",16.974],["Laos",7.453],
+                 ["Singapore",5.546],["Timor-Leste",1.350],["Brunei",0.452]],
+      growth:   [["Singapore",-1.31],["Thailand",0.12],["Myanmar",0.70],["Indonesia",0.71],
+                 ["Vietnam",0.87],["Philippines",0.91],["Brunei",0.96],["Malaysia",1.16],
+                 ["Laos",1.45],["Cambodia",1.49],["Timor-Leste",1.82]],
+      increase: [["Indonesia",45.886],["Philippines",25.085],["Vietnam",17.847],["Malaysia",8.448],
+                 ["Myanmar",5.949],["Thailand",5.710],["Cambodia",3.535],["Laos",1.584],
+                 ["Singapore",1.278],["Timor-Leste",0.402],["Brunei",0.093]]
+    };
+
+    /* Konfigurasi panel = tabel Room Builder final.
+       clock = arah jam, dist = jarak (m), width = lebar (m), labelCm = tinggi huruf kapital (cm). */
+    const PANELS = [
+      { id: 'v1', title: ['Population ranking', 'in 2005'], data: 'rank2005',
+        clock: 11, dist: 2, width: 1.3, labelCm: 5,
+        domain: [0, 300], ticks: [0, 100, 200, 300], unit: 'million',
+        tickFmt: t => String(t), valFmt: v => v.toFixed(3), highlight: (i, v) => i < 3 },
+      { id: 'v2', title: ['Population ranking', 'in 2021'], data: 'rank2021',
+        clock: 1, dist: 2, width: 1.3, labelCm: 5,
+        domain: [0, 300], ticks: [0, 100, 200, 300], unit: 'million',
+        tickFmt: t => String(t), valFmt: v => v.toFixed(3), highlight: (i, v) => i < 3 },
+      { id: 'v3', title: ['Population growth rate', 'between 2020\u20132021'], data: 'growth',
+        clock: 3, dist: 2, width: 1.3, labelCm: 5,
+        domain: [-1.5, 2], ticks: [-1, 0, 1, 2], unit: '% per year',
+        tickFmt: t => (t < 0 ? MINUS : '') + Math.abs(t) + '%',
+        valFmt: v => (v < 0 ? MINUS : '+') + Math.abs(v).toFixed(2) + '%', highlight: (i, v) => v < 0 },
+      { id: 'v4', title: ['Population increase', 'between 2005\u20132021'], data: 'increase',
+        clock: 9, dist: 2, width: 1.3, labelCm: 5,
+        domain: [0, 50], ticks: [0, 20, 40], unit: 'million',
+        tickFmt: t => String(t), valFmt: v => '+' + v.toFixed(3), highlight: (i, v) => i === 0 }
+    ];
+
+    /* =====================================================================
+       2. FUNGSI BANTU
+       ===================================================================== */
+    const clockDeg = c => (c % 12) * 30;                       // 12 = 0, 3 = 90, 9 = 270
+    const yawFor = c => { let d = clockDeg(c); if (d > 180) d -= 360; return -d; };
+
+    function wrap(g, text, maxPx) {
+      const words = text.split(' '); const lines = []; let cur = '';
+      for (const w of words) {
+        const t = cur ? cur + ' ' + w : w;
+        if (g.measureText(t).width > maxPx && cur) { lines.push(cur); cur = w; } else { cur = t; }
+      }
+      if (cur) lines.push(cur);
+      return lines;
+    }
+
+    /* =====================================================================
+       3. MENGGAMBAR PANEL GRAFIK KE CANVAS (ukuran dihitung dalam cm nyata)
+       ===================================================================== */
+    function drawPanel(cfg) {
+      const S = PX_PER_CM, L = cfg.labelCm, FS = L / CAP;      // FS = ukuran font (cm)
+      const rows = DATA[cfg.data];
+      const Wc = cfg.width * 100;
+      const pad = 0.8 * L, nameW = 8.2 * L, valW = 5.6 * L, gap = 0.4 * L;
+      const barX0 = pad + nameW + gap;
+      const barW = Wc - barX0 - gap - valW - pad;
+      const titleFS = FS * 1.1, titleLH = titleFS * 1.25;
+      const rowP = 1.8 * L, barH = 1.1 * L, axisH = 1.6 * L, srcFS = 4.2;
+      const yAxis = pad + 2 * titleLH + 1;
+      const yRows = yAxis + axisH + 1;
+      const yFoot = yRows + rows.length * rowP + 3;
+      const Hc = yFoot + srcFS * 1.4 + pad;
+
+      const c = document.createElement('canvas');
+      c.width = Math.round(Wc * S); c.height = Math.round(Hc * S);
+      const g = c.getContext('2d');
+      const X = v => v * S;
+      const [d0, d1] = cfg.domain;
+      const xOf = v => barX0 + (v - d0) / (d1 - d0) * barW;
+      const FONT = 'Arial, Helvetica, sans-serif';
+
+      // latar + bingkai
+      g.fillStyle = COL.bg; g.fillRect(0, 0, c.width, c.height);
+      g.strokeStyle = COL.edge; g.lineWidth = X(0.4); g.strokeRect(X(0.2), X(0.2), c.width - X(0.4), c.height - X(0.4));
+
+      // judul (2 baris)
+      g.fillStyle = COL.ink; g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+      g.font = `700 ${X(titleFS)}px ${FONT}`;
+      cfg.title.forEach((t, i) => g.fillText(t, X(pad), X(pad + titleLH * i + titleFS * 0.8)));
+
+      // satuan + label sumbu
+      g.font = `400 ${X(FS)}px ${FONT}`; g.fillStyle = COL.mute;
+      g.fillText(cfg.unit, X(pad), X(yAxis + axisH / 2 + L / 2));
+      g.textAlign = 'center';
+      cfg.ticks.forEach(t => g.fillText(cfg.tickFmt(t), X(xOf(t)), X(yAxis + axisH / 2 + L / 2)));
+
+      // garis grid
+      const yTop = yAxis + axisH, yBot = yRows + rows.length * rowP;
+      cfg.ticks.forEach(t => {
+        g.strokeStyle = (t === 0 && d0 < 0) ? '#8a96a3' : COL.grid;
+        g.lineWidth = X(t === 0 && d0 < 0 ? 0.3 : 0.2);
+        g.beginPath(); g.moveTo(X(xOf(t)), X(yTop)); g.lineTo(X(xOf(t)), X(yBot)); g.stroke();
+      });
+
+      // baris data
+      const z0 = xOf(Math.max(d0, 0));
+      rows.forEach(([name, v], i) => {
+        const yc = yRows + i * rowP + rowP / 2;
+        const hi = cfg.highlight(i, v);
+        const xv = xOf(v);
+        const bx = Math.min(z0, xv), bw = Math.max(Math.abs(xv - z0), 1 / S);
+        g.fillStyle = hi ? COL.hi : COL.bar;
+        g.fillRect(X(bx), X(yc - barH / 2), X(bw), X(barH));
+
+        g.font = `${hi ? 700 : 400} ${X(FS)}px ${FONT}`;
+        g.fillStyle = COL.ink;
+        g.textAlign = 'left';
+        if (g.measureText(name).width > X(nameW)) console.warn('Nama terlalu lebar untuk kolom:', name, cfg.id);
+        g.fillText(name, X(pad), X(yc + L / 2));
+        g.textAlign = 'right';
+        g.fillText(cfg.valFmt(v), X(Wc - pad), X(yc + L / 2));
+      });
+
+      // sumber (teks sekunder, lebih kecil)
+      g.textAlign = 'left'; g.fillStyle = COL.mute; g.font = `400 ${X(srcFS)}px ${FONT}`;
+      g.fillText('Source: UN DESA, WPP 2024, via Our World in Data', X(pad), X(yFoot + srcFS));
+
+      return { canvas: c, wm: Wc / 100, hm: Hc / 100 };
+    }
+
+    /* Papan judul + sumber data (bukan salah satu dari 4 visualisasi) */
+    function drawBoard() {
+      const S = PX_PER_CM, Wc = 120, pad = 5, FONT = 'Arial, Helvetica, sans-serif';
+      const items = [
+        { t: 'ASEAN Population', fs: 10.5, w: 700, c: COL.ink, after: 1 },
+        { t: 'Immersive Data Visualization', fs: 7, w: 400, c: COL.hi, after: 2 },
+        { t: '11 countries \u00b7 Compare population size, annual growth and absolute change', fs: 4.2, w: 400, c: COL.mute, after: 3 },
+        { t: 'SOURCE & DATA', fs: 4.2, w: 700, c: COL.hi, after: 0.5 },
+        { t: 'United Nations DESA, Population Division (2024). World Population Prospects 2024, via Our World in Data. https://ourworldindata.org/grapher/population-unwpp \u00b7 Supplied snapshot: 374 rows, 11 countries, 1990\u20132023.', fs: 4.2, w: 400, c: COL.ink, after: 3 },
+        { t: 'CALCULATIONS', fs: 4.2, w: 700, c: COL.hi, after: 0.5 },
+        { t: 'Annual growth = (P2021 ' + MINUS + ' P2020) / P2020 \u00d7 100', fs: 4.2, w: 400, c: COL.ink, after: 0.5 },
+        { t: 'Absolute increase = P2021 ' + MINUS + ' P2005', fs: 4.2, w: 400, c: COL.ink, after: 0.5 },
+        { t: 'Annual rates rounded to 0.01%. All 11 countries shown in every view.', fs: 4.2, w: 400, c: COL.mute, after: 0 }
+      ];
+      const meas = document.createElement('canvas').getContext('2d');
+      const lines = []; let y = pad;
+      items.forEach(it => {
+        meas.font = `${it.w} ${it.fs * S}px ${FONT}`;
+        wrap(meas, it.t, (Wc - 2 * pad) * S).forEach(line => {
+          lines.push({ line, y: y + it.fs * 0.95, font: meas.font, c: it.c });
+          y += it.fs * 1.3;
+        });
+        y += it.after;
+      });
+      const Hc = y + pad;
+      const c = document.createElement('canvas');
+      c.width = Math.round(Wc * S); c.height = Math.round(Hc * S);
+      const g = c.getContext('2d');
+      g.fillStyle = COL.bg; g.fillRect(0, 0, c.width, c.height);
+      g.strokeStyle = COL.edge; g.lineWidth = 0.4 * S; g.strokeRect(0.2 * S, 0.2 * S, c.width - 0.4 * S, c.height - 0.4 * S);
+      g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+      lines.forEach(l => { g.font = l.font; g.fillStyle = l.c; g.fillText(l.line, pad * S, l.y * S); });
+      return { canvas: c, wm: Wc / 100, hm: Hc / 100 };
+    }
+
+    /* =====================================================================
+       4. KOMPONEN A-FRAME
+       ===================================================================== */
+    // Menempelkan canvas sebagai bidang datar (+ pelat gelap tipis di belakangnya)
+    AFRAME.registerComponent('canvas-panel', {
+      schema: { id: { type: 'string' } },
+      init: function () {
+        const id = this.data.id;
+        const out = id === 'board' ? drawBoard() : drawPanel(PANELS.find(p => p.id === id));
+        const tex = new THREE.CanvasTexture(out.canvas);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        const r = this.el.sceneEl.renderer;
+        if (r) tex.anisotropy = r.capabilities.getMaxAnisotropy();
+        const front = new THREE.Mesh(new THREE.PlaneGeometry(out.wm, out.hm), new THREE.MeshBasicMaterial({ map: tex }));
+        const back = new THREE.Mesh(new THREE.PlaneGeometry(out.wm + 0.06, out.hm + 0.06), new THREE.MeshBasicMaterial({ color: 0x2b3a47 }));
+        back.position.z = -0.012;
+        this.el.setObject3D('mesh', front);
+        this.el.setObject3D('back', back);
+      }
+    });
+
+    // Membangun seluruh ruangan dari konfigurasi PANELS
+    AFRAME.registerComponent('room', {
+      init: function () {
+        const root = this.el;
+        const add = (tag, attrs) => {
+          const e = document.createElement(tag);
+          for (const k in attrs) e.setAttribute(k, attrs[k]);
+          root.appendChild(e); return e;
+        };
+        const flat = c => `shader: flat; color: ${c}`;
+
+        // lantai
+        add('a-plane', { rotation: '-90 0 0', width: 14, height: 14, material: flat('#e4eaf0') });
+
+        // angka jam di lantai
+        for (let h = 1; h <= 12; h++) {
+          const th = h * 30 * Math.PI / 180, r = 3.4;
+          add('a-text', { value: String(h), align: 'center', width: 3, color: COL.mute, rotation: '-90 0 0',
+                          position: `${(r * Math.sin(th)).toFixed(3)} 0.02 ${(-r * Math.cos(th)).toFixed(3)}` });
+        }
+
+        // penanda Home
+        add('a-ring', { 'radius-inner': 0.22, 'radius-outer': 0.28, rotation: '-90 0 0', position: '0 0.02 0', material: flat(COL.hi) });
+        add('a-text', { value: 'HOME', align: 'center', width: 1.6, color: COL.hi, rotation: '-90 0 0', position: '0 0.02 0.6' });
+
+        // sektor pandangan headset (+-50 derajat) dan avatar: hanya tampil di Overview
+        add('a-circle', { id: 'fovwedge', radius: 4, segments: 48, 'theta-start': 40, 'theta-length': 100,
+                          rotation: '-90 0 0', position: '0 0.03 0', visible: false,
+                          material: 'shader: flat; color: #1f77b4; opacity: 0.18; transparent: true' });
+        const av = add('a-entity', { id: 'avatar', visible: false });
+        const addTo = (parent, tag, attrs) => { const e = document.createElement(tag); for (const k in attrs) e.setAttribute(k, attrs[k]); parent.appendChild(e); };
+        addTo(av, 'a-cylinder', { radius: 0.18, height: 1.3, position: '0 0.65 0', material: flat(COL.hi) });
+        addTo(av, 'a-sphere', { radius: 0.13, position: '0 1.55 0', material: flat(COL.hi) });
+        addTo(av, 'a-cone', { 'radius-bottom': 0.06, 'radius-top': 0, height: 0.2, rotation: '-90 0 0', position: '0 1.55 -0.2', material: flat('#ffffff') });
+
+        // empat panel grafik
+        PANELS.forEach(p => {
+          const th = clockDeg(p.clock) * Math.PI / 180;
+          const x = p.dist * Math.sin(th), z = -p.dist * Math.cos(th);
+          add('a-entity', { position: `${x.toFixed(3)} ${EYE} ${z.toFixed(3)}`,
+                            rotation: `0 ${-clockDeg(p.clock)} 0`, 'canvas-panel': `id: ${p.id}` });
+          console.log(`${p.id}: ${(p.labelCm * 10 / p.dist).toFixed(1)} dmm`);   // harus >= 24
+        });
+
+        // Papan judul/sumber diletakkan mendatar di lantai, di depan Home Position.
+        // Rotation -90 0 0 membuat permukaan panel menghadap ke atas.
+        add('a-entity', { position: '0 0.035 -1.4', rotation: '-90 0 0', 'canvas-panel': 'id: board' });
+      }
+    });
+
+    /* =====================================================================
+       5. POSISI KAMERA & NAVIGASI
+       ===================================================================== */
+    const VIEWS = {
+      home:     [0, EYE, 0, 0, 0],
+      v1:       [0, EYE, 0, yawFor(PANELS[0].clock), 0],
+      v2:       [0, EYE, 0, yawFor(PANELS[1].clock), 0],
+      v3:       [0, EYE, 0, yawFor(PANELS[2].clock), 0],
+      v4:       [0, EYE, 0, yawFor(PANELS[3].clock), 0],
+      overview: [0, 4.8, 5.2, 0, -32]
+    };
+
+    function goTo(name) {
+      const v = VIEWS[name]; if (!v) return;
+      const cam = document.getElementById('cam');
+      const lc = cam.components['look-controls'];
+      cam.setAttribute('position', { x: v[0], y: v[1], z: v[2] });
+      if (lc) {
+        lc.yawObject.rotation.y = THREE.MathUtils.degToRad(v[3]);
+        lc.pitchObject.rotation.x = THREE.MathUtils.degToRad(v[4]);
+      }
+      const wc = cam.components['wasd-controls'];
+      if (wc && wc.velocity) wc.velocity.set(0, 0, 0);
+      const ov = name === 'overview';
+      document.getElementById('avatar').setAttribute('visible', ov);
+      document.getElementById('fovwedge').setAttribute('visible', ov);
+    }
+
+    window.addEventListener('keydown', e => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const k = e.key.toLowerCase();
+      const map = { h: 'home', '1': 'v1', '2': 'v2', '3': 'v3', '4': 'v4', o: 'overview' };
+      if (map[k]) goTo(map[k]);
+      if (k === 'u') document.getElementById('hud').classList.toggle('hidden');
+    });
+
+    window.addEventListener('DOMContentLoaded', () => {
+      document.querySelectorAll('[data-view]').forEach(b => b.addEventListener('click', () => goTo(b.dataset.view)));
+    });
+  </script>
+</head>
+
+<body>
+  <a-scene vr-mode-ui="enabled: false" renderer="antialias: true" background="color: #f4f7fa">
+    <a-entity room></a-entity>
+    <!-- Home Position: (0, 1.6, 0), menghadap jam 12 -->
+    <a-entity id="cam" camera="fov: 80; near: 0.05" position="0 1.6 0"
+              look-controls wasd-controls="acceleration: 20"></a-entity>
+  </a-scene>
+
+  <div id="hud">
+    <b>ASEAN Population &mdash; Immersive</b><br>
+    Drag mouse = menoleh &middot; W A S D = jalan<br>
+    <button data-view="home">H Home</button>
+    <button data-view="v1">1 Ranking 2005</button>
+    <button data-view="v2">2 Ranking 2021</button>
+    <button data-view="v3">3 Growth</button>
+    <button data-view="v4">4 Increase</button>
+    <button data-view="overview">O Overview</button><br>
+    Tekan <b>U</b> untuk sembunyikan panel ini (untuk screenshot)
+  </div>
+</body>
+</html>
